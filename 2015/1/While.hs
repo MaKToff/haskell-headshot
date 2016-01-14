@@ -60,141 +60,97 @@ fact = READ "n" :>>:
          ) :>>:
        WRITE (X "f")
 
+prog = WRITE (C 5 :/: C 0)
+
 -- Написать интерпретатор int, который получает программу и
 -- входной поток в виде списка целых, и возвращает результат: либо 
 -- сообщение об ошибке, либо выходной поток в виде списка целых.
 -- Например: 
 --  int fact [5] => Right 120
 --  int fact []  => Left "empty input"
-int :: S -> [Int] -> Either String [Int]
-int prog inp = 
-    case interpret (make prog) (\_ -> Nothing) inp [] of
-        Left error           -> Left error
-        Right (_, _, _, out) -> Right out
+int :: S -> [Int] -> Either String [Int] 
+int program input = do
+    (_, _, output) <- make [] input [] program
+    return $ reverse output
 
-
-type State = (String -> Maybe Int)
-
-data Interpreter a = 
-    Interpreter { interpret :: State -> [Int] -> [Int] -> Either String (a, State, [Int], [Int]) }
-
-instance Functor Interpreter where
-    fmap = liftM
-
-instance Applicative Interpreter where
-    pure x = Interpreter (\y inp out -> Right (x, y, inp, out))
-    (<*>) = ap
-
-instance Monad Interpreter where
-    return = pure
-    v >>= op = Interpreter $ \y inp out -> 
-        case (interpret v y inp out) of
-            Left str -> Left str
-            Right (x, y', inp', out') -> interpret (op x) y' inp' out'
-
--- вычисляет значение из source и присваивает его в dest 
-write :: String -> E -> Interpreter ()
-write dest source = do 
-    temp <- eval source
-    Interpreter $ \y inp out -> 
-        Right ((), \n -> 
-            if n == dest then Just temp else y n, inp, out)
-
--- читает из входного потока
-input :: Interpreter Int
-input = Interpreter $ \y inp out -> 
-    case inp of
-        [] -> Left "Empty stream"
-        (x:xs) -> Right (x, y, xs, out)
-
--- добавляет значение в выходной поток
-output :: Int -> Interpreter ()
-output x = Interpreter (\y inp out -> Right ((), y, inp, x:out))
-
--- выполняет команду языка
-make :: S -> Interpreter ()
-make SKIP = return ()
-make (l ::=: r) = do write l r
-make (READ n) = do 
-    temp <- input
-    write n (C temp)
-make (WRITE expr) = do 
-    temp <- eval expr
-    output temp
-make (s1 :>>: s2) = do 
-    make s1
-    make s2
-make (IF expr s1 s2) = do 
-    temp <- eval expr
-    case temp of 
-        1 -> make s1
-        0 -> make s2
+-- Выполняет команду языка
+make var inp out SKIP = return (var, inp, out)
+make var inp out (s ::=: v) = do
+    temp <- eval var v
+    return ((s, temp) : var, inp, out)
+make var [] out (READ s) = Left "empty input"
+make var (x:xs) out (READ s) = return ((s,x) : var, xs, out)
+make var inp out (WRITE v) = do
+    temp <- eval var v
+    return (var, inp, temp : out)
+make var inp out (s1 :>>: s2) = do
+    (var', inp', out') <- make var inp out s1
+    make var' inp' out' s2
+make var inp out (IF e s1 s2) = do
+    temp <- eval var e
+    case temp of
+        1         -> make var inp out s1
+        0         -> make var inp out s2
         otherwise -> undefined
-make (WHILE expr s) = do 
-    temp <- eval expr
-    case temp of 
-        1 -> make s >> make (WHILE expr s)
-        0 -> return ()
+make var inp out (WHILE e s) = do
+    temp <- eval var e
+    case temp of
+        1         -> make var inp out (s :>>: WHILE e s)
+        0         -> return (var, inp, out)
         otherwise -> undefined
 
+-- Вычисляет значение выражения
+eval var (X s) = find s var
+eval var (C v) = return v
+eval var (l :+: r) = do
+    a <- eval var l
+    b <- eval var r
+    return $ a + b
+eval var (l :-: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ a - b
+eval var (l :*: r) = do
+    a <- eval var l
+    b <- eval var r
+    return $ a * b
+eval var (l :/: r) = do 
+    a <- eval var l
+    b <- eval var r
+    if (b == 0) then Left "Division by zero" else return $ a `div` b
+eval var (l :%: r) = do 
+    a <- eval var l
+    b <- eval var r
+    if (b == 0) then Left "Division by zero" else return $ a `rem` b
+eval var (l :=: r) = do
+    a <- eval var l
+    b <- eval var r
+    return $ boolToInt $ a == b
+eval var (l :/=: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ boolToInt $ a /= b
+eval var (l :<: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ boolToInt $ a < b
+eval var (l :>: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ boolToInt $ a > b
+eval var (l :/\: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ (a `rem` 2) * (b `rem` 2)
+eval var (l :\/: r) = do 
+    a <- eval var l
+    b <- eval var r
+    return $ if ((a `rem` 2) + (b `rem` 2) > 0) then 1 else 0
 
--- находит значение переменной
-find :: String -> Interpreter Int
-find x = Interpreter $ \y inp out -> 
-    case y x of
-        Nothing    -> Left "Incorect variable"
-        Just value -> Right (value, y, inp, out)
+find x [] = Left $ "Undefined variable " ++ x
+find x ((s,v):xs) = if x == s then Right v else find x xs
 
 boolToInt expr = if expr then 1 else 0
-
--- вычисляет значение выражения
-eval :: E -> Interpreter Int
-eval (X n) = do find n
-eval (C x) = do return x
-eval (l :+: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (tempL + tempR)
-eval (l :-: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (tempL - tempR)
-eval (l :*: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (tempL * tempR)
-eval (l :/: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (tempL `div` tempR)
-eval (l :%: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (tempL `rem` tempR)
-eval (l :=: r) = do
-    tempL <- eval l
-    tempR <- eval r
-    return (boolToInt (tempL == tempR))
-eval (l :/=: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (boolToInt (tempL /= tempR))
-eval (l :<: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (boolToInt (tempL < tempR))
-eval (l :>: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return (boolToInt (tempL > tempR))
-eval (l :/\: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return $ if ((tempL `rem` 2) * (tempR `rem` 2) > 0) then 1 else 0
-eval (l :\/: r) = do 
-    tempL <- eval l
-    tempR <- eval r
-    return $ if ((tempL `rem` 2) + (tempR `rem` 2) > 0) then 1 else 0
 
 -- Написать на While проверку простоты числа isPrime. Например,
 --   int isPrime [5] => Right 1
